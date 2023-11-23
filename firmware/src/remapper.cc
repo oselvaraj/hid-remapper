@@ -26,6 +26,7 @@ const uint8_t V_RESOLUTION_BITMASK = (1 << 0);
 const uint8_t H_RESOLUTION_BITMASK = (1 << 2);
 const uint32_t V_SCROLL_USAGE = 0x00010038;
 const uint32_t H_SCROLL_USAGE = 0x000C0238;
+const uint32_t ERROR_ROLLOVER_USAGE = 0x00070001;
 
 const uint8_t NLAYERS = 4;
 const uint32_t LAYERS_USAGE_PAGE = 0xFFF10000;
@@ -74,7 +75,7 @@ std::vector<uint8_t> report_ids;
 #define MAX_INPUT_STATES 1024
 #define PREV_STATE_OFFSET MAX_INPUT_STATES
 
-int32_t input_state[MAX_INPUT_STATES * 2];
+int32_t input_state[MAX_INPUT_STATES * 3];
 std::unordered_map<uint32_t, int32_t*> usage_state_ptr;  // usage -> input_state pointer
 uint32_t used_state_slots = 0;
 
@@ -112,6 +113,8 @@ uint8_t monitor_report_idx = 0;
 int32_t registers[NREGISTERS] = { 0 };
 
 uint64_t frame_counter = 0;
+
+int32_t* rollover_state_ptr;
 
 int32_t handle_scroll(uint32_t source_usage, uint32_t target_usage, int32_t movement) {
     int32_t ret = 0;
@@ -302,6 +305,9 @@ void set_mapping_from_config() {
     memset(input_state, 0, sizeof(input_state));
     uint32_t gpio_in_mask_ = 0;
     uint32_t gpio_out_mask_ = 0;
+
+    assign_state_slot(ERROR_ROLLOVER_USAGE);
+    rollover_state_ptr = get_state_ptr(ERROR_ROLLOVER_USAGE);
 
     for (auto const& mapping : config_mappings) {
         uint8_t layer_mask = mapping.layer_mask;
@@ -1116,6 +1122,9 @@ void do_handle_received_report(const uint8_t* report, int len, uint16_t interfac
         }
     }
 
+    // backup current state in case we need to roll back
+    memcpy(input_state + 2 * PREV_STATE_OFFSET, input_state, used_state_slots * sizeof(input_state[0]));
+
     uint8_t interface_idx = interface_index[interface];
     for (int32_t* state_ptr : array_range_usages[interface][report_id]) {
         *state_ptr &= ~(1 << interface_idx);
@@ -1127,6 +1136,11 @@ void do_handle_received_report(const uint8_t* report, int len, uint16_t interfac
         } else {
             read_input_range(report, len, their.usage, their.usage_def, interface_idx);
         }
+    }
+
+    if (*rollover_state_ptr != 0) {
+        // roll back state to ignore this input report
+        memcpy(input_state, input_state + 2 * PREV_STATE_OFFSET, used_state_slots * sizeof(input_state[0]));
     }
 
     if (monitor_enabled) {
